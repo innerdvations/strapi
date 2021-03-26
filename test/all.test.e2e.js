@@ -5,6 +5,8 @@ const { flatMap, uniq, negate } = require('lodash/fp');
 const glob = require('glob');
 const chalk = require('chalk');
 
+jest.setTimeout(60000);
+
 const fileExtension = '.test.e2e.js';
 const filePattern = `*${fileExtension}`;
 
