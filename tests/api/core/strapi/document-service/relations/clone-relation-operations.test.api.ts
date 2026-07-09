@@ -14,13 +14,26 @@ const builder = createTestBuilder();
 
 const PRODUCT_UID = 'api::product.product' as UID.ContentType;
 const TAG_UID = 'api::tag.tag' as UID.ContentType;
+const RELATION_PANEL_UID = 'default.relation-panel' as UID.Component;
+
+/** Default relation field value after CM prepareRelations on duplicate form load. */
+const DUPLICATE_FORM_UNTOUCHED_RELATION_OPS = {
+  connect: [],
+  disconnect: [],
+} as const;
 
 type ProductWithTags = {
   tag?: {
     documentId?: string;
   } | null;
+  tags?: Array<{ documentId?: string }>;
   legacyTag?: {
     documentId?: string;
+  } | null;
+  relationPanel?: {
+    tag?: {
+      documentId?: string;
+    } | null;
   } | null;
 };
 
@@ -40,6 +53,16 @@ const productModel = {
       relation: 'oneToOne',
       target: TAG_UID,
       useJoinTable: false,
+    },
+    tags: {
+      type: 'relation',
+      relation: 'manyToMany',
+      target: TAG_UID,
+    },
+    relationPanel: {
+      type: 'component',
+      component: RELATION_PANEL_UID,
+      repeatable: false,
     },
   },
   pluginOptions: {
@@ -67,12 +90,25 @@ const tagModel = {
   collectionName: '',
 };
 
+const relationPanelComponentModel = {
+  collectionName: 'components_relation_panels',
+  attributes: {
+    tag: {
+      type: 'relation',
+      relation: 'oneToOne',
+      target: TAG_UID,
+    },
+  },
+  displayName: 'relation-panel',
+};
+
 const createTag = (name: string) => strapi.documents(TAG_UID).create({ data: { name } });
 
-const relationDocumentId = (
-  product: ProductWithTags | undefined,
-  attribute: keyof ProductWithTags
-) => product?.[attribute]?.documentId ?? null;
+const relationDocumentId = (product: ProductWithTags | undefined, attribute: 'tag' | 'legacyTag') =>
+  product?.[attribute]?.documentId ?? null;
+
+const componentRelationDocumentId = (component: ProductWithTags['relationPanel']) =>
+  component?.tag?.documentId ?? null;
 
 const createTaggedProduct = async (productName: string, tagName: string) => {
   const tag = await createTag(tagName);
@@ -112,12 +148,59 @@ const findProductWithTags = (documentId: string) =>
   strapi.documents(PRODUCT_UID).findOne({
     documentId,
     locale: 'en',
-    populate: { tag: true, legacyTag: true },
+    populate: {
+      tag: true,
+      legacyTag: true,
+      tags: true,
+      relationPanel: { populate: { tag: true } },
+    },
   });
+
+const createProductWithManyTags = async (productName: string, tagNames: string[]) => {
+  const tags = await Promise.all(tagNames.map((name) => createTag(name)));
+
+  const product = await strapi.documents(PRODUCT_UID).create({
+    locale: 'en',
+    data: {
+      name: productName,
+      tags: tags.map((tag) => ({ documentId: tag.documentId })),
+    },
+    populate: { tags: true },
+  });
+
+  expect((product as ProductWithTags).tags).toHaveLength(tags.length);
+
+  return { product, tags };
+};
+
+const createProductWithComponentTag = async (productName: string, tagName: string) => {
+  const tag = await createTag(tagName);
+
+  const product = await strapi.documents(PRODUCT_UID).create({
+    locale: 'en',
+    data: {
+      name: productName,
+      relationPanel: {
+        tag: { documentId: tag.documentId },
+      },
+    },
+    populate: { relationPanel: { populate: { tag: true } } },
+  });
+
+  expect((product as ProductWithTags).relationPanel?.tag).toMatchObject({
+    documentId: tag.documentId,
+  });
+
+  return { product, tag };
+};
 
 describe('Document Service clone relation operation payloads', () => {
   beforeAll(async () => {
-    await builder.addContentTypes([tagModel, productModel]).build();
+    await builder
+      .addContentTypes([tagModel])
+      .addComponent(relationPanelComponentModel)
+      .addContentTypes([productModel])
+      .build();
 
     strapi = await createStrapiInstance();
   });
@@ -190,6 +273,169 @@ describe('Document Service clone relation operation payloads', () => {
       }).toEqual({
         cloneTagDocumentId: selectedTag.documentId,
         originalTagDocumentId: originalTag.documentId,
+      });
+    }
+  );
+
+  testInTransaction(
+    'clone preserves oneToOne relation when duplicate form sends empty connect/disconnect',
+    async () => {
+      const { product, tag } = await createTaggedProduct(
+        'Untouched O2O Source Product',
+        'Untouched O2O Tag'
+      );
+
+      const result = await strapi.documents(PRODUCT_UID).clone({
+        documentId: product.documentId,
+        locale: 'en',
+        data: {
+          name: 'Untouched O2O Clone',
+          tag: DUPLICATE_FORM_UNTOUCHED_RELATION_OPS,
+        },
+        populate: { tag: true },
+      });
+
+      const originalProduct = await findProductWithTags(product.documentId);
+
+      expect({
+        cloneTagDocumentId: relationDocumentId(result.entries[0] as ProductWithTags, 'tag'),
+        originalTagDocumentId: relationDocumentId(originalProduct as ProductWithTags, 'tag'),
+      }).toEqual({
+        cloneTagDocumentId: tag.documentId,
+        originalTagDocumentId: tag.documentId,
+      });
+    }
+  );
+
+  testInTransaction(
+    'clone preserves oneToOne relation when submitted data omits relation fields',
+    async () => {
+      const { product, tag } = await createTaggedProduct(
+        'Auto-clone O2O Source Product',
+        'Auto-clone O2O Tag'
+      );
+
+      const result = await strapi.documents(PRODUCT_UID).clone({
+        documentId: product.documentId,
+        locale: 'en',
+        data: {
+          name: 'Auto-clone O2O Clone',
+        },
+        populate: { tag: true },
+      });
+
+      const originalProduct = await findProductWithTags(product.documentId);
+
+      expect({
+        cloneTagDocumentId: relationDocumentId(result.entries[0] as ProductWithTags, 'tag'),
+        originalTagDocumentId: relationDocumentId(originalProduct as ProductWithTags, 'tag'),
+      }).toEqual({
+        cloneTagDocumentId: tag.documentId,
+        originalTagDocumentId: tag.documentId,
+      });
+    }
+  );
+
+  testInTransaction(
+    'clone preserves manyToMany relations when duplicate form sends empty connect/disconnect',
+    async () => {
+      const { product, tags } = await createProductWithManyTags('Untouched M2M Source Product', [
+        'Untouched M2M Tag A',
+        'Untouched M2M Tag B',
+      ]);
+
+      const result = await strapi.documents(PRODUCT_UID).clone({
+        documentId: product.documentId,
+        locale: 'en',
+        data: {
+          name: 'Untouched M2M Clone',
+          tags: DUPLICATE_FORM_UNTOUCHED_RELATION_OPS,
+        },
+        populate: { tags: true },
+      });
+
+      const originalProduct = await findProductWithTags(product.documentId);
+      const expectedTagDocumentIds = tags.map((tag) => tag.documentId).sort();
+
+      expect({
+        cloneTagDocumentIds: ((result.entries[0] as ProductWithTags).tags ?? [])
+          .map((tag) => tag.documentId)
+          .sort(),
+        originalTagDocumentIds: ((originalProduct as ProductWithTags).tags ?? [])
+          .map((tag) => tag.documentId)
+          .sort(),
+      }).toEqual({
+        cloneTagDocumentIds: expectedTagDocumentIds,
+        originalTagDocumentIds: expectedTagDocumentIds,
+      });
+    }
+  );
+
+  testInTransaction(
+    'clone clears oneToOne relation when duplicate form sends explicit set null',
+    async () => {
+      const { product, tag } = await createTaggedProduct(
+        'Explicit Set Source Product',
+        'Explicit Set Tag'
+      );
+
+      const result = await strapi.documents(PRODUCT_UID).clone({
+        documentId: product.documentId,
+        locale: 'en',
+        data: {
+          name: 'Explicit Set Clone',
+          tag: { set: null },
+        },
+        populate: { tag: true },
+      });
+
+      const originalProduct = await findProductWithTags(product.documentId);
+
+      expect({
+        cloneTagDocumentId: relationDocumentId(result.entries[0] as ProductWithTags, 'tag'),
+        originalTagDocumentId: relationDocumentId(originalProduct as ProductWithTags, 'tag'),
+      }).toEqual({
+        cloneTagDocumentId: null,
+        originalTagDocumentId: tag.documentId,
+      });
+    }
+  );
+
+  testInTransaction(
+    'clone applies duplicate-form disconnect for a component oneToOne relation',
+    async () => {
+      const { product, tag } = await createProductWithComponentTag(
+        'Component O2O Source Product',
+        'Component O2O Tag'
+      );
+
+      const result = await strapi.documents(PRODUCT_UID).clone({
+        documentId: product.documentId,
+        locale: 'en',
+        data: {
+          name: 'Component O2O Clone without tag',
+          relationPanel: {
+            tag: {
+              connect: [],
+              disconnect: [{ documentId: tag.documentId }],
+            },
+          },
+        },
+        populate: { relationPanel: { populate: { tag: true } } },
+      });
+
+      const originalProduct = await findProductWithTags(product.documentId);
+
+      expect({
+        cloneComponentTagDocumentId: componentRelationDocumentId(
+          (result.entries[0] as ProductWithTags).relationPanel
+        ),
+        originalComponentTagDocumentId: componentRelationDocumentId(
+          (originalProduct as ProductWithTags).relationPanel
+        ),
+      }).toEqual({
+        cloneComponentTagDocumentId: null,
+        originalComponentTagDocumentId: tag.documentId,
       });
     }
   );

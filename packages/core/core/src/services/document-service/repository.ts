@@ -53,6 +53,8 @@ type RelationAttribute = {
   type: 'relation';
   relation: string;
   useJoinTable?: boolean;
+  private?: boolean;
+  target?: string;
 };
 
 const isRelationAttribute = (attribute: unknown): attribute is RelationAttribute => {
@@ -68,32 +70,286 @@ const isRelationOperationPayload = (value: unknown): value is Record<string, unk
   );
 };
 
+const hasMeaningfulRelationOperations = (value: Record<string, unknown>): boolean => {
+  if (Object.prototype.hasOwnProperty.call(value, 'set')) {
+    return true;
+  }
+
+  const connect = value.connect;
+  const disconnect = value.disconnect;
+
+  return (
+    (Array.isArray(connect) && connect.length > 0) ||
+    (Array.isArray(disconnect) && disconnect.length > 0)
+  );
+};
+
 const canTransformRelationOperationPayload = (attribute: RelationAttribute) => {
   return attribute.useJoinTable !== false && attribute.relation !== 'morphToOne';
 };
 
-const mergeCloneData = (
-  originalData: Record<string, unknown>,
-  submittedData: Record<string, unknown> | undefined,
-  contentType: { attributes: Record<string, unknown> }
+type SchemaWithAttributes = { attributes: Record<string, unknown> };
+
+const applyRelationOperationOverrides = (
+  mergedData: Record<string, unknown>,
+  submittedData: Record<string, unknown>,
+  schema: SchemaWithAttributes
 ) => {
-  const mergedData = merge(originalData, submittedData ?? {}) as Record<string, unknown>;
+  for (const [attributeName, attribute] of Object.entries(schema.attributes)) {
+    if (!Object.prototype.hasOwnProperty.call(submittedData, attributeName)) {
+      continue;
+    }
 
-  if (!submittedData) {
-    return mergedData;
-  }
+    const submittedValue = submittedData[attributeName];
 
-  for (const [attributeName, attribute] of Object.entries(contentType.attributes)) {
-    if (
-      isRelationAttribute(attribute) &&
-      canTransformRelationOperationPayload(attribute) &&
-      isRelationOperationPayload(submittedData[attributeName])
-    ) {
-      mergedData[attributeName] = submittedData[attributeName];
+    if (isRelationAttribute(attribute)) {
+      if (
+        canTransformRelationOperationPayload(attribute) &&
+        isRelationOperationPayload(submittedValue) &&
+        hasMeaningfulRelationOperations(submittedValue)
+      ) {
+        mergedData[attributeName] = submittedValue;
+      }
+
+      continue;
+    }
+
+    if (contentTypesUtils.isComponentAttribute(attribute as any)) {
+      const componentSchema = getModel((attribute as { component: string }).component);
+
+      if ((attribute as { repeatable?: boolean }).repeatable) {
+        if (!Array.isArray(submittedValue) || !Array.isArray(mergedData[attributeName])) {
+          continue;
+        }
+
+        const mergedItems = mergedData[attributeName] as Record<string, unknown>[];
+
+        submittedValue.forEach((submittedItem, index) => {
+          if (isRecord(submittedItem) && isRecord(mergedItems[index])) {
+            applyRelationOperationOverrides(mergedItems[index], submittedItem, componentSchema);
+          }
+        });
+      } else if (isRecord(submittedValue) && isRecord(mergedData[attributeName])) {
+        applyRelationOperationOverrides(
+          mergedData[attributeName] as Record<string, unknown>,
+          submittedValue,
+          componentSchema
+        );
+      }
+
+      continue;
+    }
+
+    if (contentTypesUtils.isDynamicZoneAttribute(attribute as any)) {
+      if (!Array.isArray(submittedValue) || !Array.isArray(mergedData[attributeName])) {
+        continue;
+      }
+
+      const mergedItems = mergedData[attributeName] as Record<string, unknown>[];
+
+      submittedValue.forEach((submittedItem, index) => {
+        if (!isRecord(submittedItem) || !isRecord(mergedItems[index])) {
+          return;
+        }
+
+        const componentUid = submittedItem.__component;
+
+        if (typeof componentUid !== 'string') {
+          return;
+        }
+
+        applyRelationOperationOverrides(mergedItems[index], submittedItem, getModel(componentUid));
+      });
     }
   }
+};
 
-  return mergedData;
+const hasPopulatedRelationValue = (value: unknown): boolean => {
+  if (value === null || value === undefined) {
+    return false;
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+
+  if (isRecord(value)) {
+    return 'id' in value || 'documentId' in value;
+  }
+
+  return false;
+};
+
+const isBidirectionalOneToAnyRelation = (
+  attribute: RelationAttribute & {
+    inversedBy?: string;
+    mappedBy?: string;
+    targetAttribute?: string;
+  }
+) => {
+  return (
+    ['oneToOne', 'oneToMany'].includes(attribute.relation) &&
+    [attribute.mappedBy, attribute.inversedBy, attribute.targetAttribute].some((key) => key != null)
+  );
+};
+
+const isCloneJoinRelationAttribute = (
+  attribute: RelationAttribute,
+  attributeName: string,
+  schema: SchemaWithAttributes
+) => {
+  if (attribute.private === true || contentTypesUtils.isPrivateAttribute(schema, attributeName)) {
+    return false;
+  }
+
+  return typeof attribute.target === 'string' && attribute.target.startsWith('api::');
+};
+
+const shouldCopyJoinRelationOnClone = (
+  attribute: RelationAttribute & {
+    inversedBy?: string;
+    mappedBy?: string;
+    targetAttribute?: string;
+  },
+  submittedData: Record<string, unknown>,
+  attributeName: string,
+  mergedValue: unknown,
+  schema: SchemaWithAttributes
+) => {
+  if (!canTransformRelationOperationPayload(attribute)) {
+    return false;
+  }
+
+  if (!isCloneJoinRelationAttribute(attribute, attributeName, schema)) {
+    return false;
+  }
+
+  if (!isBidirectionalOneToAnyRelation(attribute)) {
+    return false;
+  }
+
+  if (!hasPopulatedRelationValue(mergedValue)) {
+    return false;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(submittedData, attributeName)) {
+    return true;
+  }
+
+  const submittedValue = submittedData[attributeName];
+
+  if (isRelationOperationPayload(submittedValue)) {
+    return !hasMeaningfulRelationOperations(submittedValue);
+  }
+
+  return false;
+};
+
+const collectUnchangedJoinRelationsToCopy = (
+  mergedData: Record<string, unknown>,
+  submittedData: Record<string, unknown>,
+  schema: SchemaWithAttributes,
+  joinRelationsToCopy: string[]
+) => {
+  for (const [attributeName, attribute] of Object.entries(schema.attributes)) {
+    if (!isRelationAttribute(attribute)) {
+      continue;
+    }
+
+    if (
+      shouldCopyJoinRelationOnClone(
+        attribute,
+        submittedData,
+        attributeName,
+        mergedData[attributeName],
+        schema
+      )
+    ) {
+      joinRelationsToCopy.push(attributeName);
+      delete mergedData[attributeName];
+    }
+  }
+};
+
+const prepareCloneEntryData = (
+  originalData: Record<string, unknown>,
+  submittedData: Record<string, unknown> | undefined,
+  contentType: SchemaWithAttributes
+) => {
+  const submitted = submittedData ?? {};
+  const mergedData = merge(originalData, submitted) as Record<string, unknown>;
+  const joinRelationsToCopy: string[] = [];
+
+  applyRelationOperationOverrides(mergedData, submitted, contentType);
+  collectUnchangedJoinRelationsToCopy(mergedData, submitted, contentType, joinRelationsToCopy);
+
+  return { data: mergedData, joinRelationsToCopy };
+};
+
+const copyCloneJoinRelations = async (
+  uid: string,
+  sourceEntryId: number,
+  targetEntryId: number,
+  attributeNames: string[]
+) => {
+  if (attributeNames.length === 0) {
+    return;
+  }
+
+  const { attributes } = strapi.db.metadata.get(uid);
+  const idColumn = strapi.db.metadata.identifiers.ID_COLUMN;
+
+  await strapi.db.transaction(async ({ trx }) => {
+    for (const attributeName of attributeNames) {
+      const attribute = attributes[attributeName];
+
+      if (
+        !attribute ||
+        attribute.type !== 'relation' ||
+        !('joinTable' in attribute) ||
+        !attribute.joinTable
+      ) {
+        continue;
+      }
+
+      const { joinTable } = attribute;
+      const { joinColumn } = joinTable;
+
+      const where: Record<string, unknown> = {
+        [joinColumn.name]: sourceEntryId,
+        ...(('on' in joinTable && joinTable.on) || {}),
+      };
+
+      const rows = await strapi.db
+        .connection(joinTable.name)
+        .transacting(trx)
+        .where(where)
+        .select('*');
+
+      if (rows.length === 0) {
+        continue;
+      }
+
+      const inserts = rows.map((row: Record<string, unknown>) => {
+        const rowWithoutId = { ...row };
+        delete rowWithoutId[idColumn];
+
+        return {
+          ...rowWithoutId,
+          [joinColumn.name]: targetEntryId,
+        };
+      });
+
+      const batchSize = strapi.db.dialect.getBatchInsertSize();
+
+      for (let i = 0; i < inserts.length; i += batchSize) {
+        await strapi.db
+          .connection(joinTable.name)
+          .transacting(trx)
+          .insert(inserts.slice(i, i + batchSize));
+      }
+    }
+  });
 };
 
 export const createContentTypeRepository: RepositoryFactoryMethod = (
@@ -500,17 +756,38 @@ export const createContentTypeRepository: RepositoryFactoryMethod = (
       populate: getDeepPopulate(uid, { relationalFields: ['id'] }),
     });
 
-    const clonedEntries = await async.map(
-      entriesToClone,
-      async.pipe(
-        omit(['id', 'createdAt', 'updatedAt']),
-        // assign new documentId
-        assoc('documentId', createDocumentId()),
-        // Merge new data into it
-        (data) => mergeCloneData(data, queryParams.data, contentType),
-        (data) => entries.create({ ...queryParams, data, status: 'draft' })
-      )
-    );
+    const newDocumentId = createDocumentId();
+
+    const clonedEntries = await async.map(entriesToClone, async (entryToClone: any) => {
+      const sourceEntryId = entryToClone.id as number;
+      const { data, joinRelationsToCopy } = prepareCloneEntryData(
+        omit(['id', 'createdAt', 'updatedAt'], entryToClone) as Record<string, unknown>,
+        queryParams.data,
+        contentType
+      );
+      const dataWithDocumentId = assoc('documentId', newDocumentId, data);
+
+      const doc = await entries.create({
+        ...queryParams,
+        data: dataWithDocumentId,
+        status: 'draft',
+      });
+
+      await copyCloneJoinRelations(uid, sourceEntryId, doc.id, joinRelationsToCopy);
+
+      if (joinRelationsToCopy.length === 0) {
+        return doc;
+      }
+
+      const selectionParams = pickSelectionParams(queryParams);
+      const { populate, select } = transformParamsToQuery(uid, selectionParams as any);
+
+      return strapi.db.query(uid).findOne({
+        ...(populate ? { populate } : {}),
+        ...(select ? { select } : {}),
+        where: { id: doc.id },
+      });
+    });
 
     clonedEntries.forEach(emitEvent('entry.create'));
 
