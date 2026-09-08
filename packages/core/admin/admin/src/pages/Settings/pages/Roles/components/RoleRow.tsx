@@ -1,5 +1,7 @@
 import { Box, Flex, IconButton, IconButtonProps, Td, Tr, Typography } from '@strapi/design-system';
+import { Pencil } from '@strapi/icons';
 import { useIntl } from 'react-intl';
+import * as React from 'react';
 
 import type { AdminRole } from '../../../../../hooks/useAdminRoles';
 
@@ -21,11 +23,11 @@ const RoleRow = ({
   cursor,
 }: RoleRowProps) => {
   const { formatMessage } = useIntl();
-  // Find the edit button dynamically instead of assuming it's at a fixed index
-  // This handles permission combinations where canCreate is false
-  const editObject = icons.find(
-    (icon) => icon.label === formatMessage({ id: 'app.utils.edit', defaultMessage: 'Edit' })
-  );
+  // Find the edit icon by matching the Pencil component type, which is stable
+  // across locales and doesn't depend on translated strings
+  const editObject = icons.find((icon) => {
+    return React.isValidElement(icon.children) && icon.children.type === Pencil;
+  });
 
   const usersCountText = formatMessage(
     {
@@ -41,7 +43,7 @@ const RoleRow = ({
       aria-rowindex={rowIndex}
       key={id}
       // @ts-expect-error – the prop uses `HTMLButtonElement` but we just specify `HTMLElement`
-      onClick={canUpdate && editObject ? editObject.onClick : undefined}
+      onClick={canUpdate ? editObject.onClick : undefined}
     >
       <Td maxWidth={`13rem`}>
         <Typography ellipsis textColor="neutral800">
