@@ -41,6 +41,11 @@ describe('buildSortSchema', () => {
       expect(result.success).toBe(false);
     });
 
+    it('rejects string with uppercase direction', () => {
+      const result = schema.safeParse('title:ASC');
+      expect(result.success).toBe(false);
+    });
+
     it('rejects string with unknown field', () => {
       const result = schema.safeParse('unknownField:asc');
       expect(result.success).toBe(false);
