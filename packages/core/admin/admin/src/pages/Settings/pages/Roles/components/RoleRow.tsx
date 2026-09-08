@@ -43,7 +43,7 @@ const RoleRow = ({
       aria-rowindex={rowIndex}
       key={id}
       // @ts-expect-error – the prop uses `HTMLButtonElement` but we just specify `HTMLElement`
-      onClick={canUpdate ? editObject.onClick : undefined}
+      onClick={editObject.onClick}
     >
       <Td maxWidth={`13rem`}>
         <Typography ellipsis textColor="neutral800">
