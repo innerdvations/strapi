@@ -75,7 +75,7 @@ export const buildSortSchema = (
   const isPermittedSortString = (value: string): boolean => {
     const match = sortStringPattern.exec(value);
     if (match === null) {
-      return true;
+      return false;
     }
     return scalarKeys.includes(match[1]);
   };
