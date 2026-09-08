@@ -253,6 +253,7 @@ const ListPage = () => {
                     ].filter(Boolean) as RoleRowProps['icons']
                   }
                   rowIndex={index + 2}
+                  canUpdate={canUpdate}
                 />
               ))}
             </Tbody>
