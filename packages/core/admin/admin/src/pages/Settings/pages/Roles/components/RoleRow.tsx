@@ -8,7 +8,6 @@ import type { AdminRole } from '../../../../../hooks/useAdminRoles';
 interface RoleRowProps extends Pick<AdminRole, 'id' | 'name' | 'description' | 'usersCount'> {
   icons: Array<Required<Pick<IconButtonProps, 'children' | 'label' | 'onClick'>>>;
   rowIndex: number;
-  canUpdate?: boolean;
   cursor?: string;
 }
 
@@ -19,7 +18,6 @@ const RoleRow = ({
   usersCount,
   icons,
   rowIndex,
-  canUpdate,
   cursor,
 }: RoleRowProps) => {
   const { formatMessage } = useIntl();

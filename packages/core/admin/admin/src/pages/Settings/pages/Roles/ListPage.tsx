@@ -221,7 +221,7 @@ const ListPage = () => {
             <Tbody>
               {roles?.map((role, index) => (
                 <RoleRow
-                  cursor="pointer"
+                  cursor={canUpdate ? 'pointer' : undefined}
                   key={role.id}
                   id={role.id}
                   name={role.name}
@@ -253,7 +253,6 @@ const ListPage = () => {
                     ].filter(Boolean) as RoleRowProps['icons']
                   }
                   rowIndex={index + 2}
-                  canUpdate={canUpdate}
                 />
               ))}
             </Tbody>
